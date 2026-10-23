@@ -1,0 +1,17 @@
+# docker compose up --build   ->  http://localhost:8000   (SQLite by default)
+# For PostgreSQL: uncomment the db service and the DATABASE_URL line, and add psycopg[binary] to requirements.txt.
+services:
+  portal:
+    build: .
+    ports: ["8000:8000"]
+    environment:
+      JWT_SECRET: change-me-to-a-long-random-secret-of-32-plus-bytes
+      DEMO_MODE: "1"            # set to 0 in production: disables passwordless demo logins
+      # DATABASE_URL: postgresql+psycopg://nidhi:nidhi@db:5432/nidhisetu
+    volumes: ["nidhi-data:/app/data"]
+  # db:
+  #   image: postgres:16
+  #   environment: { POSTGRES_USER: nidhi, POSTGRES_PASSWORD: nidhi, POSTGRES_DB: nidhisetu }
+  #   volumes: ["pg-data:/var/lib/postgresql/data"]
+volumes:
+  nidhi-data: {}

@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>NidhiSetu | Security Deposit & FDR Portal</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<header class="top">
+  <div class="brand"><span class="logo">&#8377;</span><div><b>NidhiSetu</b><small>Security deposit &amp; FDR lifecycle portal &middot; AICTE</small></div></div>
+  <nav id="nav">
+    <button data-view="institution" class="on">Institution view</button>
+    <button data-view="bureau">Bureau dashboard</button>
+    <button data-view="discrepancy">Discrepancy view</button>
+    <button data-view="release">Release (Cl. 6.46)</button>
+    <button data-view="audit">Audit trail</button>
+  </nav>
+  <div class="who"><span id="clockTag" class="tag"></span><select id="roleSel" title="Demo sign-in"></select></div>
+</header>
+<main>
+  <section id="v-institution" class="view on"></section>
+  <section id="v-bureau" class="view"></section>
+  <section id="v-discrepancy" class="view"></section>
+  <section id="v-release" class="view"></section>
+  <section id="v-audit" class="view"></section>
+</main>
+<footer>Prototype on synthetic data &middot; SIH 2026 &middot; PS SIH26265 &middot; Team Data_VeriGuard</footer>
+<script src="/static/app.js"></script>
+</body>
+</html>
