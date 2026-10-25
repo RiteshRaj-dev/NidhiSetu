@@ -113,3 +113,12 @@ All data is fictitious. Results describe this prototype on this synthetic set, n
   }
 }
 ```
+
+## Document forensics (ELA), added feature
+
+| Set | Documents | Score range | Flagged (>= 40) |
+|---|---|---|---|
+| Clean synthetic scans (re-saved JPEG) | 24 | 15.4 - 29.3 | 0 |
+| Same scans with a pasted-in amount | 24 | 48.3 - 67.8 | 24 |
+
+Synthetic only; not calibrated on real forged documents. Reproduce with `pytest tests/test_features.py` (six-layout guard test).

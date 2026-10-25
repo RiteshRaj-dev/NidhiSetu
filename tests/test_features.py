@@ -192,3 +192,25 @@ def test_manual_resolve_marks_verified_without_touching_column_a(client):
     assert client.get("/api/audit/verify", headers=so).json()["valid"]
     ok = _by_ref(client, "LEG0001")
     assert client.post(f"/api/instruments/{ok['id']}/manual-resolve", json={"note": "x"}, headers=so).status_code == 409
+
+
+def test_ela_threshold_separates_clean_and_forged_across_layouts(tmp_path):
+    """Calibration guard: several receipt layouts, clean vs pasted-amount, all on the right side of the cutoff."""
+    from app import forensics
+    from app.ocr import render_pages
+    for i in range(1, 7):
+        item = {"id": i, "institution": "T", "layout": i % 3, "fmt": i % 2, "bank_printed": "State Bank of India",
+                "ref_no": f"7001122{i:04d}", "amount": 1000000 + i * 250000, "issue_date": "2018-08-15",
+                "maturity_date": "2027-01-01", "lien": True}
+        p = tmp_path / f"c{i}.pdf"
+        synth.draw_receipt(p, item, random.Random(i))
+        orig = render_pages(p)[0]
+        scan = _jpeg(_jpeg(orig, 85), 85)
+        w, h = scan.size
+        box = (int(w * .45), int(h * .30), int(w * .80), int(h * .34))
+        patch = orig.crop(box)
+        ImageDraw.Draw(patch).rectangle((0, 0, patch.width, patch.height), fill="white")
+        ImageDraw.Draw(patch).text((10, 8), "Rs. 95,00,000.00", fill="black", font=ImageFont.load_default(size=40))
+        forged = scan.copy(); forged.paste(patch, box)
+        assert not forensics.analyse(_jpeg(scan, 90))["suspect"], i
+        assert forensics.analyse(_jpeg(forged, 90))["suspect"], i

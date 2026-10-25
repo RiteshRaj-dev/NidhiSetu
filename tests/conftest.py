@@ -5,6 +5,7 @@ from pathlib import Path
 
 os.environ.setdefault("NIDHISETU_DATA", tempfile.mkdtemp(prefix="nidhisetu_test_"))
 os.environ["DEMO_MODE"] = "1"
+os.environ["NIDHISETU_NO_SCHEDULER"] = "1"
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import pytest  # noqa: E402

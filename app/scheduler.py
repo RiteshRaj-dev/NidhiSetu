@@ -18,7 +18,7 @@ def run_daily(db: Session, today: date, actor: str = "scheduler") -> list[Alert]
         if days < 0:
             if "OVERDUE" not in have:
                 a = Alert(instrument_id=inst.id, kind="OVERDUE", sent_on=today, recipient="Regulation Bureau scrutiny officer",
-                          channel="portal+email+sms",
+                          channel="portal",
                           message=f"{inst.d_ref_no} matured {-days} day(s) ago with no renewal or release action. Escalated.")
                 inst.escalated = True
                 db.add(a); created.append(a)
@@ -30,7 +30,7 @@ def run_daily(db: Session, today: date, actor: str = "scheduler") -> list[Alert]
         k = min(crossed)
         if any(f"T-{o}" in have for o in offsets if o <= k):
             continue
-        a = Alert(instrument_id=inst.id, kind=f"T-{k}", sent_on=today, channel="portal+email+sms",
+        a = Alert(instrument_id=inst.id, kind=f"T-{k}", sent_on=today, channel="portal",
                   message=f"{inst.d_ref_no} ({inst.d_bank}) matures on {inst.d_maturity_date:%d-%b-%Y}: {days} day(s) left. Please renew or apply for release.")
         db.add(a); created.append(a)
         audit.append(db, actor, "system", f"alert.T-{k}", "instrument", inst.id, {"days_left": days})

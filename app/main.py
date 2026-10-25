@@ -6,7 +6,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 from . import audit, bank, bulk, clock, forensics, notice, release, rules as rules_mod, scheduler, services, seed
-from .config import BASE_DIR, DEMO_MODE, VAULT_DIR
+from .config import BASE_DIR, DEMO_MODE, JWT_SECRET, VAULT_DIR
 from .db import get_db, init_db, SessionLocal
 from .models import Institution, Instrument, ReleaseRequest, User, AuditLog, KINDS
 from .normalize import parse_amount, parse_date
@@ -16,11 +16,33 @@ app = FastAPI(title="NidhiSetu", version="1.0.0",
               description="Bank-verified security deposit and FDR lifecycle portal (SIH 2026, PS SIH26265)")
 
 
+async def _daily_loop():
+    """Runs the maturity monitor once at start-up and then every 24 h (in addition to the manual button)."""
+    import asyncio
+    from fastapi.concurrency import run_in_threadpool
+
+    def once():
+        with SessionLocal() as db:
+            scheduler.run_daily(db, clock.today(db))
+
+    while True:
+        try:
+            await run_in_threadpool(once)
+        except Exception:      # a failed run must never kill the loop
+            pass
+        await asyncio.sleep(86400)
+
+
 @app.on_event("startup")
-def _startup():
+async def _startup():
+    import asyncio, os
+    if not DEMO_MODE and JWT_SECRET.startswith("change-me"):
+        raise RuntimeError("Refusing to start: set a real JWT_SECRET when DEMO_MODE=0")
     init_db()
     with SessionLocal() as db:
         seed.ensure_users(db)
+    if os.getenv("NIDHISETU_NO_SCHEDULER") != "1":
+        app.state.daily = asyncio.create_task(_daily_loop())
 
 
 def _inst(db: Session, iid: int, user: User) -> Instrument:
@@ -30,6 +52,22 @@ def _inst(db: Session, iid: int, user: User) -> Instrument:
     if user.role == "institution" and user.institution_id != inst.institution_id:
         raise HTTPException(403, "Not your institution's instrument")
     return inst
+
+
+ALLOWED_EXT = {".pdf", ".png", ".jpg", ".jpeg"}
+MAGIC = {".pdf": (b"%PDF",), ".png": (b"\x89PNG",), ".jpg": (b"\xff\xd8\xff",), ".jpeg": (b"\xff\xd8\xff",)}
+LOCKED_STATES = ("RELEASE_PENDING", "RELEASED", "RENEWED")
+
+
+def _check_scan(filename: str, content: bytes) -> None:
+    """Scans must really be PDF/PNG/JPEG: blocks HTML/script uploads and unreadable files before they reach the vault."""
+    ext = Path(filename or "").suffix.lower()
+    if ext not in ALLOWED_EXT:
+        raise HTTPException(422, "Only PDF, PNG or JPG scans are accepted")
+    if not content or len(content) > 15_000_000:
+        raise HTTPException(422, "Empty or too large (15 MB max)")
+    if not content.startswith(MAGIC[ext]):
+        raise HTTPException(422, "File content does not match its extension")
 
 
 def _ser(db, inst, with_ocr=False):
@@ -73,6 +111,10 @@ def get_rules(db: Session = Depends(get_db), user: User = Depends(current_user))
 
 @app.put("/api/rules")
 def put_rules(patch: dict, db: Session = Depends(get_db), user: User = Depends(require("admin", "scrutiny_officer"))):
+    try:
+        rules_mod.validate_patch(patch)
+    except ValueError as e:
+        raise HTTPException(422, str(e))
     r = rules_mod.set_rules(db, patch)
     audit.append(db, user.username, user.role, "rules.update", "rules", None, patch)
     db.commit()
@@ -88,9 +130,14 @@ async def upload(file: UploadFile = File(...), institution_id: int = Form(...), 
     if user.role == "institution" and user.institution_id != institution_id:
         raise HTTPException(403, "Cannot upload for another institution")
     content = await file.read()
-    if not content or len(content) > 15_000_000:
-        raise HTTPException(422, "Empty or too large (15 MB max)")
-    inst = services.create_draft(db, user, institution_id, kind, file.filename or "upload.pdf", content)
+    _check_scan(file.filename or "upload.pdf", content)
+    try:
+        inst = services.create_draft(db, user, institution_id, kind, file.filename or "upload.pdf", content)
+    except HTTPException:
+        raise
+    except Exception:
+        db.rollback()
+        raise HTTPException(422, "The document could not be read. Upload a clear PDF, PNG or JPG scan.")
     return _ser(db, inst, with_ocr=True)
 
 
@@ -106,6 +153,8 @@ class Confirm(BaseModel):
 @app.post("/api/instruments/{iid}/confirm")
 def confirm(iid: int, body: Confirm, db: Session = Depends(get_db), user: User = Depends(require("institution", "dealing_hand"))):
     inst = _inst(db, iid, user)
+    if inst.state in LOCKED_STATES:
+        raise HTTPException(409, f"Declared values are locked while the instrument is {inst.state}")
     services.confirm(db, user, inst, body.model_dump())
     return _ser(db, inst)
 
@@ -114,7 +163,16 @@ def confirm(iid: int, body: Confirm, db: Session = Depends(get_db), user: User =
 async def add_doc(iid: int, doc_type: str = Form(...), file: UploadFile = File(...), db: Session = Depends(get_db),
                   user: User = Depends(require("institution", "dealing_hand"))):
     inst = _inst(db, iid, user)
-    services.add_document(db, user, inst, doc_type, file.filename or "doc.pdf", await file.read())
+    r = rules_mod.get_rules(db)
+    known = set(r["release_documents"]) | set(r["required_docs_submission"]) | {"deposit_confirmation"}
+    if doc_type not in known:
+        raise HTTPException(422, f"doc_type must be one of {sorted(known)}")
+    if inst.state in ("RELEASED", "RENEWED"):
+        raise HTTPException(409, f"Instrument is {inst.state}; documents are locked")
+    data = await file.read()
+    if Path(file.filename or "").suffix.lower() not in ALLOWED_EXT | {""} or not data or len(data) > 15_000_000:
+        raise HTTPException(422, "Attach a PDF, PNG or JPG under 15 MB")
+    services.add_document(db, user, inst, doc_type, file.filename or "doc.pdf", data)
     return _ser(db, inst)
 
 
@@ -189,7 +247,8 @@ def get_file(iid: int, db: Session = Depends(get_db), user: User = Depends(curre
     p = VAULT_DIR / (inst.doc_name or "")
     if not inst.doc_name or not p.exists():
         raise HTTPException(404, "No document")
-    return FileResponse(p, media_type="application/pdf" if p.suffix == ".pdf" else None)
+    return FileResponse(p, media_type="application/pdf" if p.suffix.lower() == ".pdf" else "application/octet-stream",
+                        headers={"X-Content-Type-Options": "nosniff", "Content-Disposition": f'inline; filename="doc{p.suffix.lower()}"'})
 
 
 @app.get("/api/instruments/{iid}/preview")
@@ -222,7 +281,11 @@ def scrutiny(iid: int, body: Scrutiny, db: Session = Depends(get_db), user: User
 @app.post("/api/instruments/{iid}/renew")
 async def renew(iid: int, file: UploadFile = File(...), db: Session = Depends(get_db), user: User = Depends(require("institution", "dealing_hand"))):
     parent = _inst(db, iid, user)
-    child = services.renew(db, user, parent, file.filename or "renewal.pdf", await file.read())
+    if parent.state != "ACTIVE":
+        raise HTTPException(409, f"Only ACTIVE instruments can be renewed (this one is {parent.state})")
+    content = await file.read()
+    _check_scan(file.filename or "renewal.pdf", content)
+    child = services.renew(db, user, parent, file.filename or "renewal.pdf", content)
     return _ser(db, child, with_ocr=True)
 
 
@@ -244,9 +307,16 @@ class BankConfirm(BaseModel):
 
 @app.post("/api/bank/webhook")
 def bank_webhook(body: BankConfirm, db: Session = Depends(get_db), user: User = Depends(require("bank_nodal"))):
+    from .models import BankRecord
+    from .normalize import canon_ref, canon_bank
+    prev = db.query(BankRecord).filter(BankRecord.ref_no == canon_ref(body.ref_no)).first()
+    if prev and canon_bank(prev.bank) != canon_bank(body.bank):
+        raise HTTPException(409, "A record with this reference already exists for a different bank")
+    before = ({"amount": float(prev.amount), "issue_date": prev.issue_date, "maturity_date": prev.maturity_date, "lien": prev.lien}
+              if prev else None)
     rec = bank.register_bank_record(db, body.ref_no, body.bank, body.amount, parse_date(body.issue_date),
                                     parse_date(body.maturity_date), body.lien)
-    audit.append(db, user.username, user.role, "bank.webhook", "bank_record", rec.id, body.model_dump())
+    audit.append(db, user.username, user.role, "bank.webhook", "bank_record", rec.id, {**body.model_dump(), "previous": before})
     db.commit()
     return {"ok": True, "id": rec.id}
 
@@ -262,7 +332,10 @@ def reverify(iid: int, db: Session = Depends(get_db), user: User = Depends(requi
 @app.get("/api/dashboard")
 def dashboard(db: Session = Depends(get_db), user: User = Depends(current_user)):
     today, r = clock.today(db), rules_mod.get_rules(db)
-    rows = [services.serialize(i, today, r) for i in db.query(Instrument).all()]
+    qry = db.query(Instrument)
+    if user.role == "institution":
+        qry = qry.filter(Instrument.institution_id == user.institution_id)
+    rows = [services.serialize(i, today, r) for i in qry.all()]
     counts = {k: 0 for k in ("Active", "Expiring", "Matured", "Renewed", "Released", "Pending")}
     for x in rows:
         counts[x["category"]] = counts.get(x["category"], 0) + 1
@@ -299,7 +372,10 @@ def run_scheduler(db: Session = Depends(get_db), user: User = Depends(require("a
 @app.get("/api/alerts")
 def alerts(db: Session = Depends(get_db), user: User = Depends(current_user)):
     from .models import Alert
-    rows = db.query(Alert).order_by(Alert.id.desc()).limit(100).all()
+    qry = db.query(Alert).join(Instrument, Alert.instrument_id == Instrument.id)
+    if user.role == "institution":
+        qry = qry.filter(Instrument.institution_id == user.institution_id)
+    rows = qry.order_by(Alert.id.desc()).limit(100).all()
     return [{"id": a.id, "instrument_id": a.instrument_id, "kind": a.kind, "sent_on": a.sent_on, "recipient": a.recipient,
              "message": a.message} for a in rows]
 
@@ -353,6 +429,8 @@ def clearance(iid: int, body: Clearance, db: Session = Depends(get_db), user: Us
     req = _req(db, iid)
     if not req or body.cell not in rules_mod.get_rules(db)["release_clearances"]:
         raise HTTPException(404, "Unknown request or clearance cell")
+    if req.state != "OPEN":
+        raise HTTPException(409, f"Release request is {req.state}; clearances are locked")
     release.set_clearance(db, user, req, body.cell, body.approve)
     return release.evaluate(db, inst, req, clock.today(db))
 
@@ -367,6 +445,8 @@ def decision(iid: int, body: Decision, db: Session = Depends(get_db), user: User
     req = _req(db, iid)
     if not req:
         raise HTTPException(404, "No release request")
+    if req.state != "OPEN":
+        raise HTTPException(409, f"Release request is already {req.state}")
     try:
         release.decide(db, user, inst, req, body.approve, clock.today(db))
     except ValueError as e:

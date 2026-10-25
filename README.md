@@ -7,6 +7,8 @@ NidhiSetu keeps what an institution *declares* about a deposit (Column A) strict
 
 > **Everything here runs on synthetic, fictitious data.** The bank side is a simulated CBS/NeSL adapter behind a pluggable interface; no real bank, AICTE or NeSL system is contacted.
 
+Build progress: [PROGRESS.md](PROGRESS.md)
+
 ## Screenshots (real, captured from this prototype)
 
 | Institution view: OCR pre-fill and confirm | Bureau dashboard |
@@ -16,6 +18,16 @@ NidhiSetu keeps what an institution *declares* about a deposit (Column A) strict
 | ![](docs/screenshots/03_discrepancy_view.png) | ![](docs/screenshots/04_release_clause_646.png) |
 
 Audit trail: [docs/screenshots/05_audit_trail.png](docs/screenshots/05_audit_trail.png)
+
+### Added features
+
+| Bureau: CSV export and legacy import | Forensics: ELA score and tamper heatmap |
+|---|---|
+| ![](docs/screenshots/06_bureau_csv_import_export.png) | ![](docs/screenshots/07_ela_forensics_heatmap.png) |
+| **Discrepancy: Show-Cause Notice button** | **Manual review: mark verified after nodal confirmation** |
+| ![](docs/screenshots/08_discrepancy_show_cause.png) | ![](docs/screenshots/09_manual_review_resolve.png) |
+| **Release: order SHA-256 and PDF download** | **Show-Cause Notice PDF (generated)** |
+| ![](docs/screenshots/10_release_order_pdf_sha256.png) | ![](docs/screenshots/11_show_cause_notice.png) |
 
 ## What is implemented (mapped to the 10 expected capabilities)
 
@@ -31,6 +43,7 @@ Audit trail: [docs/screenshots/05_audit_trail.png](docs/screenshots/05_audit_tra
 | 8 | Consolidated dashboard (Active, Expiring, Matured, Renewed, Released, Pending) | `/api/dashboard`, `frontend/` |
 | 9 | Role-based access (JWT) and hash-chained append-only audit log | `app/security.py`, `app/audit.py` |
 | 10 | Pluggable bank API integration and nodal-officer webhook | `app/bank.py`, `/api/bank/webhook` |
+| + | Document forensics, show-cause notice, CSV import/export, manual nodal resolution, order PDF | `app/forensics.py`, `app/notice.py`, `app/bulk.py`, `app/main.py` |
 
 ## Additional features
 
@@ -43,7 +56,9 @@ Audit trail: [docs/screenshots/05_audit_trail.png](docs/screenshots/05_audit_tra
 | Show-Cause Notice PDF | `GET /api/instruments/{id}/discrepancy-notice.pdf` |
 | Manual nodal resolution (Column A untouched) | `POST /api/instruments/{id}/manual-resolve` |
 
-The ELA score is a screening heuristic checked on synthetic receipts only; it routes a document to a human and is not proof of tampering.
+Where to find them in the UI: **Bureau dashboard** has Export CSV, Import Legacy CSV and a one-click sample import; **Institution view** shows the forensics chip and the ELA heatmap toggle after upload; **Discrepancy view** has the Show-Cause Notice download and, for unsupported banks, the manual-review resolution; **Release view** shows the order SHA-256 and the PDF download once approved.
+
+**ELA forensics:** the first page is re-saved as JPEG (quality 90) and compared with the original; the score (0-100) measures how far the most anomalous 16 px block sits above a typical content block, and a score of 40 or more is flagged for human scrutiny. On 24 synthetic receipts, clean scans scored 15-29 and the same scans with a pasted-in amount scored 48-68. This is a screening heuristic, not calibrated on real forged documents and not proof of tampering.
 
 ## Quick start
 
@@ -99,23 +114,29 @@ Stack: FastAPI, SQLAlchemy (SQLite by default, PostgreSQL via `DATABASE_URL`), T
 ## Tests
 
 ```bash
-pytest -q        # 31 tests: normalisation, reconciliation, audit-chain tamper detection, alert thresholds, release gate, RBAC, end-to-end API flow
+pytest -q        # 39 tests: normalisation, reconciliation, audit-chain tamper detection, alert thresholds, release gate, RBAC, end-to-end API flow,
+                 # order PDF, CSV export/import, ELA forensics, show-cause notice, manual resolution,
+                 # security-review regressions (state locks, scoping, upload validation, rule validation)
 ```
 
 ## Repository layout
 
 ```
-app/        FastAPI service (models, OCR, bank gateway, reconcile, scheduler, release, audit, security)
+app/        FastAPI service (models, OCR, forensics, bank gateway, reconcile, scheduler, release, notice, bulk CSV, audit, security)
 frontend/   single-page UI (5 views)
 eval/       synthetic data generator, evaluation harness and results
-scripts/    seed_demo.py, run_server.sh, capture_screenshots.py
-tests/      pytest suite
+scripts/    seed_demo.py, run_server.sh, capture_screenshots.py, capture_features.py
+tests/      pytest suite (core, API, added features)
 docs/       screenshots
 ```
 
+## Security review
+
+A review of the code found and fixed: reversal of an approved release, edits to declared values after release or while release was pending, institution users seeing other institutions' dashboard rows and alerts, HTML/unreadable uploads (now 422, not 500), arbitrary document types, unvalidated rule changes that could crash the scheduler, a bank nodal user reassigning a reference to another bank, renewing a non-active instrument, and a missing automatic maturity run (now a background loop plus the manual button). All are covered by `tests/test_hardening.py`. The container runs as a non-root user, and the app refuses to start with `DEMO_MODE=0` and the default `JWT_SECRET`.
+
 ## Limitations
 
-Synthetic data only; simulated bank API; alerts are logged in-portal rather than sent by SMS/email; documents are stored on local disk (encryption at rest is a deployment task); the demo login must be disabled in any real deployment; the APH rule tables and Clause 6.46 checklist reflect the problem statement as understood by the team and must be validated with AICTE.
+Synthetic data only; simulated bank API; alerts are recorded in-portal and not sent by SMS or email; documents are stored unencrypted on local disk and are not malware-scanned (release documents are checked for presence and type, not content); the demo login is passwordless and must be disabled (`DEMO_MODE=0`) in any real deployment. Known design gaps that need production work: the audit hash chain detects edits but has no external anchor and appends are not serialised across multiple server instances; the `admin` role passes every role check, so there is no separation of duties for it; bank nodal users are not bound to a single bank; there is no login rate limiting, CORS policy or HTTPS (add them at the gateway); the database has no migrations; dependencies are unpinned; the ELA score is a heuristic. The APH rule tables and Clause 6.46 checklist reflect the problem statement as understood by the team and must be validated with AICTE.
 
 ## License
 
