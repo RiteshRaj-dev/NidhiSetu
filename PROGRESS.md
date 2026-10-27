@@ -17,7 +17,7 @@ Team Data_VeriGuard (ID 152167) · SIH 2026 · PS SIH26265
 
 ## Next
 
-- Public live demo (Render or Railway) and repository made public on 27 Oct.
+- Public live demo (Snapdeploy & Blitz Cloud) and repository made public from private on 27 Oct.
 - Real CBS / NeSL bank adapters behind the existing adapter interface.
 - Calibrate the ELA threshold on real scanned documents.
 - Encryption at rest for the document vault; SMS / email alert gateways.
